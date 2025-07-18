@@ -1,0 +1,19 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+broadcast/
+lib/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+
+# Temp files
+script/standalones/
+src/PPS.sol
+src/Royalties.sol
+src/Subscriptions.sol
