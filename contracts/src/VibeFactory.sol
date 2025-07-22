@@ -9,8 +9,7 @@ import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 /**
  * @title VibeFactory
  * @dev Simplified factory contract for creating Vibestream NFTs with integrated delegation
- * Features ProxyAdmin pattern for vibestream-specific delegation management
- * Optimized for Metis Hyperion compatibility with minimal complexity
+ * Using ProxyAdmin pattern for vibestream-specific delegation management
  */
 contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
     // Events
@@ -35,7 +34,7 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
     address public proxyAdmin;
     address public vibeKiosk; // Single standalone VibeKiosk contract address
 
-    // Gas limits for defensive programming
+    // Profilactic gas limits for network optimization
     uint256 private constant MIN_GAS_BUFFER = 50000; // 50k gas buffer
     
     // ProxyAdmin-based delegation mappings
@@ -181,7 +180,6 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
 
     /**
      * @dev Creates a vibestream and sets up delegation in one transaction
-     * This replaces the need for RTAWrapper.sol
      */
     function createVibestreamWithDelegate(
         string calldata mode,

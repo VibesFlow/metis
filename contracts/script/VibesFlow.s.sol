@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
 /**
  * @title VibesFlowDeploy
- * @dev Simplified deployment script for streamlined VibesFlow architecture
+ * @dev Streamlined VibesFlow architecture
  * Features: VibeFactory with integrated delegation + standalone VibeKiosk + ProxyAdmin
  * Eliminated: RTAWrapper, Distributor, per-vibestream VibeKiosk deployments
  */
@@ -37,7 +37,7 @@ contract VibesFlowDeploy is Script {
 
         vm.startBroadcast(config.deployerPrivateKey);
 
-        // Deploy simplified contracts
+        // Deploy contracts
         DeployedContracts memory contracts = deployAllContracts(config);
         
         // Configure contracts
