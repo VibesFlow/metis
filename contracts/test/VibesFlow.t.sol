@@ -1,342 +1,474 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test, console} from "forge-std/Test.sol";
-import {RTAWrapper} from "../src/RTAWrapper.sol";
-import {VibeFactory} from "../src/VibeFactory.sol";
-import {VibeKiosk} from "../src/VibeKiosk.sol";
-import {VibeManager} from "../src/VibeManager.sol";
-import {Delegation} from "../src/Delegation.sol";
+import "forge-std/Test.sol";
+import "../src/VibeFactory.sol";
+import "../src/VibeKiosk.sol";
+import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
+/**
+ * @title VibesFlow Test Suite
+ * @dev Comprehensive tests for simplified VibesFlow contracts
+ * Tests: VibeFactory with integrated delegation + standalone VibeKiosk + ProxyAdmin
+ */
 contract VibesFlowTest is Test {
+    // Test contracts
     VibeFactory public vibeFactory;
-    VibeManager public vibeManager;
-    RTAWrapper public rtaWrapper;
+    VibeKiosk public vibeKiosk;
+    ProxyAdmin public proxyAdmin;
     
-    address public owner = address(0x1);
-    address public creator = address(0x2);
-    address public delegatee = address(0x3);
-    address public treasury = address(0x4);
-    address public buyer = address(0x5);
+    // Test addresses
+    address public owner;
+    address public creator;
+    address public delegatee;
+    address public treasury;
+    address public ticketBuyer;
     
-    string public constant DEFAULT_MODE = "group";
-    bool public constant DEFAULT_STORE_TO_FILECOIN = true;
-    uint256 public constant DEFAULT_DISTANCE = 5;
-    string public constant DEFAULT_TITLE = "Test Vibestream";
-    string public constant DEFAULT_METADATA = "ipfs://QmTestHash";
-    uint256 public constant DEFAULT_START_DATE = 1700000000;
-    uint256 public constant DEFAULT_TICKETS_AMOUNT = 100;
-    uint256 public constant DEFAULT_TICKET_PRICE = 0.1 ether;
-    
-    event VibestreamCreated(
-        uint256 indexed vibeId,
-        address indexed creator,
-        uint256 startDate,
-        string mode,
-        string title,
-        string metadataURI,
-        address vibeKioskAddress
-    );
-    
-    event TicketMinted(
-        uint256 indexed ticketId,
-        address indexed buyer,
-        string ticketName,
-        string title,
-        uint256 price
-    );
+    // Test constants
+    uint256 public constant DEFAULT_START_DATE = 1785000000; // Future timestamp
+    string public constant DEFAULT_METADATA = "ipfs://vibesflow/test";
+    uint256 public constant DEFAULT_TICKET_PRICE = 100000000000000000; // 0.1 ETH
 
     function setUp() public {
+        // Set up test addresses
+        owner = makeAddr("owner");
+        creator = makeAddr("creator");
+        delegatee = makeAddr("delegatee");
+        treasury = makeAddr("treasury");
+        ticketBuyer = makeAddr("ticketBuyer");
+        
         vm.startPrank(owner);
         
+        // Deploy ProxyAdmin
+        proxyAdmin = new ProxyAdmin(owner);
+        
         // Deploy VibeFactory
-        vibeFactory = new VibeFactory();
+        vibeFactory = new VibeFactory(owner, treasury);
         
-        // Deploy VibeManager
-        vibeManager = new VibeManager();
+        // Deploy standalone VibeKiosk
+        vibeKiosk = new VibeKiosk(address(vibeFactory), treasury, owner);
         
-        // Initialize contracts
-        vibeManager.initialize(owner, address(vibeFactory));
-        vibeFactory.initialize(owner, address(vibeManager), address(0), treasury);
+        // Configure contracts
+        vibeFactory.setProxyAdmin(address(proxyAdmin));
+        vibeFactory.setVibeKiosk(address(vibeKiosk));
         
-        // Deploy RTAWrapper
-        rtaWrapper = new RTAWrapper(address(vibeFactory), address(vibeManager));
+        vm.stopPrank();
+
+        // Give test addresses some ETH for ticket purchases
+        vm.deal(ticketBuyer, 10 ether);
+        vm.deal(creator, 1 ether);
+    }
+
+    function testSoloModeVibestream() public {
+        vm.startPrank(creator);
         
-        // Set RTAWrapper in VibeManager
-        vibeManager.setRTAWrapper(address(rtaWrapper));
+        uint256 vibeId = vibeFactory.createVibestream(
+            "solo",
+            true,
+            1, // Distance doesn't matter for solo mode
+            "ipfs://QmSoloHash",
+            0, // No tickets in solo mode
+            0  // No ticket price in solo mode
+        );
+        
+        // Get vibestream data
+        VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
+        
+        // Verify vibestream was created correctly
+        assertEq(vibeData.creator, creator);
+        assertEq(vibeData.mode, "solo");
+        assertEq(vibeData.distance, 1);
+        assertEq(vibeData.metadataURI, "ipfs://QmSoloHash");
+        assertEq(vibeData.ticketsAmount, 0);
+        assertEq(vibeData.ticketPrice, 0);
+        assertFalse(vibeData.finalized);
+        
+        // Verify NFT ownership
+        assertEq(vibeFactory.ownerOf(vibeId), creator);
         
         vm.stopPrank();
     }
-    
-    function testSetup() public view {
-        assertEq(vibeFactory.owner(), owner);
-        assertEq(vibeManager.owner(), owner);
-        assertEq(address(vibeManager.vibeFactory()), address(vibeFactory));
-        assertEq(vibeManager.RTAWrapper(), address(rtaWrapper));
-    }
-    
-    function testCreateVibestream() public {
+
+    function testGroupModeZeroTickets() public {
         vm.startPrank(creator);
         
-        vm.expectEmit(true, true, false, false);
-        emit VibestreamCreated(0, creator, DEFAULT_START_DATE, DEFAULT_MODE, DEFAULT_TITLE, DEFAULT_METADATA, address(0));
-        
         uint256 vibeId = vibeFactory.createVibestream(
-            DEFAULT_START_DATE,
-            DEFAULT_MODE,
-            DEFAULT_STORE_TO_FILECOIN,
-            DEFAULT_DISTANCE,
-            DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
+            "group",
+            true,
+            5, // Distance for group mode
+            "ipfs://QmGroupZeroTicketsHash",
+            0, // Zero tickets - should not register with VibeKiosk
             DEFAULT_TICKET_PRICE
         );
         
-        assertEq(vibeId, 0);
-        assertEq(vibeFactory.ownerOf(vibeId), creator);
-        assertEq(vibeFactory.totalVibestreams(), 1);
+        // Get vibestream data
+        VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
         
-        // Check vibestream data
+        // Verify vibestream was created correctly
+        assertEq(vibeData.creator, creator);
+        assertEq(vibeData.mode, "group");
+        assertEq(vibeData.distance, 5);
+        assertEq(vibeData.metadataURI, "ipfs://QmGroupZeroTicketsHash");
+        assertEq(vibeData.ticketsAmount, 0);
+        assertEq(vibeData.ticketPrice, DEFAULT_TICKET_PRICE);
+        assertFalse(vibeData.finalized);
+        
+        vm.stopPrank();
+    }
+
+    function testGroupModeWithTickets() public {
+        vm.startPrank(creator);
+        
+        // Create a group vibestream with tickets
+        uint256 vibeId = vibeFactory.createVibestream(
+            "group",
+            true,
+            5,
+            DEFAULT_METADATA,
+            100, // Tickets amount >= 1
+            DEFAULT_TICKET_PRICE
+        );
+        
+        // Verify vibestream was created
         VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
         assertEq(vibeData.creator, creator);
-        assertEq(vibeData.startDate, DEFAULT_START_DATE);
-        assertEq(vibeData.mode, DEFAULT_MODE);
-        assertEq(vibeData.storeToFilecoin, DEFAULT_STORE_TO_FILECOIN);
-        assertEq(vibeData.distance, DEFAULT_DISTANCE);
-        assertEq(vibeData.metadataURI, DEFAULT_METADATA);
-        assertFalse(vibeData.finalized);
-        assertTrue(vibeData.vibeKioskAddress != address(0));
+        assertEq(vibeData.mode, "group");
+        assertEq(vibeData.ticketsAmount, 100);
+        
+        // Verify VibeKiosk was notified and registered the vibestream
+        // Note: We can't directly check this without exposing internal state
+        // But we can test ticket purchasing to verify registration worked
         
         vm.stopPrank();
     }
-    
-    function testCreateVibestreamWithDefaultTitle() public {
+
+    function testCreateVibestreamWithDelegate() public {
         vm.startPrank(creator);
         
-        uint256 vibeId = vibeFactory.createVibestream(
-            DEFAULT_START_DATE,
-            DEFAULT_MODE,
-            DEFAULT_STORE_TO_FILECOIN,
-            DEFAULT_DISTANCE,
-            "", // Empty title should use default
+        // Test integrated creation + delegation function
+        uint256 vibeId = vibeFactory.createVibestreamWithDelegate(
+            "group",
+            true,
+            5,
             DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
-            DEFAULT_TICKET_PRICE
+            50, // Tickets
+            DEFAULT_TICKET_PRICE,
+            delegatee // Delegate to this address
         );
         
+        // Verify vibestream was created
         VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
-        assertEq(vibeData.title, "Vibe 0");
+        assertEq(vibeData.creator, creator);
+        assertEq(vibeData.mode, "group");
+        assertEq(vibeData.ticketsAmount, 50);
+        
+        // Verify delegation was set
+        address currentDelegate = vibeFactory.getDelegate(vibeId);
+        assertEq(currentDelegate, delegatee);
         
         vm.stopPrank();
     }
-    
-    function testVibeKioskDeployment() public {
+
+    function testDelegationManagement() public {
         vm.startPrank(creator);
         
+        // Create a vibestream
         uint256 vibeId = vibeFactory.createVibestream(
-            DEFAULT_START_DATE,
-            DEFAULT_MODE,
-            DEFAULT_STORE_TO_FILECOIN,
-            DEFAULT_DISTANCE,
-            DEFAULT_TITLE,
+            "group",
+            true,
+            5,
             DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
+            25,
             DEFAULT_TICKET_PRICE
         );
         
-        VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
-        VibeKiosk vibeKiosk = VibeKiosk(vibeData.vibeKioskAddress);
+        vm.stopPrank();
         
-        // Test VibeKiosk properties
-        assertEq(vibeKiosk.vibeId(), vibeId);
-        assertEq(vibeKiosk.creator(), creator);
-        assertEq(vibeKiosk.ticketsAmount(), DEFAULT_TICKETS_AMOUNT);
-        assertEq(vibeKiosk.ticketPrice(), DEFAULT_TICKET_PRICE);
-        assertEq(vibeKiosk.ticketsSold(), 0);
-        assertTrue(vibeKiosk.isAvailable());
+        // Switch to proxyAdmin owner to set delegation (owner is the ProxyAdmin owner)
+        vm.startPrank(owner);
+        
+        vibeFactory.setDelegate(vibeId, delegatee);
+        
+        // Verify delegation was created
+        address currentDelegate = vibeFactory.getDelegate(vibeId);
+        assertEq(currentDelegate, delegatee);
+        
+        // Test removing delegation
+        vibeFactory.removeDelegate(vibeId);
+        currentDelegate = vibeFactory.getDelegate(vibeId);
+        assertEq(currentDelegate, address(0));
         
         vm.stopPrank();
     }
-    
-    function testPurchaseTicket() public {
+
+    function testMetadataUpdateByCreator() public {
         vm.startPrank(creator);
         
+        // Create vibestream
         uint256 vibeId = vibeFactory.createVibestream(
-            DEFAULT_START_DATE,
-            DEFAULT_MODE,
-            DEFAULT_STORE_TO_FILECOIN,
-            DEFAULT_DISTANCE,
-            DEFAULT_TITLE,
+            "solo",
+            true,
+            1,
             DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
-            DEFAULT_TICKET_PRICE
+            0,
+            0
         );
         
-        VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
-        VibeKiosk vibeKiosk = VibeKiosk(vibeData.vibeKioskAddress);
+        // Creator should be able to update their own vibestream metadata
+        string memory newMetadata = "ipfs://vibesflow/updated";
+        vibeFactory.setMetadataURI(vibeId, newMetadata);
         
-        vm.stopPrank();
-        
-        // Purchase ticket as buyer
-        vm.deal(buyer, 1 ether);
-        vm.startPrank(buyer);
-        
-        uint256 ticketId = vibeKiosk.purchaseTicket{value: DEFAULT_TICKET_PRICE}();
-        
-        assertEq(ticketId, 1);
-        assertEq(vibeKiosk.ownerOf(ticketId), buyer);
-        assertEq(vibeKiosk.ticketsSold(), 1);
-        assertTrue(vibeKiosk.hasTicketForVibestream(buyer, vibeId));
-        
-        // Check ticket data
-        (
-            uint256 returnedVibeId,
-            address owner_,
-            address originalOwner,
-            uint256 purchasePrice,
-            uint256 purchaseTimestamp,
-            string memory name,
-            string memory title,
-            string memory metadataURI,
-            uint256 ticketNumber,
-            uint256 totalTickets
-        ) = vibeKiosk.getTicketInfo(ticketId);
-        
-        assertEq(returnedVibeId, vibeId);
-        assertEq(owner_, buyer);
-        assertEq(originalOwner, buyer);
-        assertEq(purchasePrice, DEFAULT_TICKET_PRICE);
-        assertEq(name, "rta0_ticket1");
-        assertEq(title, DEFAULT_TITLE);
-        assertEq(metadataURI, DEFAULT_METADATA);
-        assertEq(ticketNumber, 1);
-        assertEq(totalTickets, DEFAULT_TICKETS_AMOUNT);
-        
-        vm.stopPrank();
-    }
-    
-    function testDelegationProxy() public {
-        vm.startPrank(creator);
-        
-        uint256 vibeId = vibeFactory.createVibestream(
-            DEFAULT_START_DATE,
-            DEFAULT_MODE,
-            DEFAULT_STORE_TO_FILECOIN,
-            DEFAULT_DISTANCE,
-            DEFAULT_TITLE,
-            DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
-            DEFAULT_TICKET_PRICE
-        );
-        
-        // Create delegation proxy
-        vibeManager.createDelegationProxy(vibeId, delegatee);
-        
-        address proxyAddress = vibeManager.vibeDelegationProxy(vibeId);
-        assertTrue(proxyAddress != address(0));
-        
-        Delegation delegation = Delegation(proxyAddress);
-        assertEq(delegation.vibeId(), vibeId);
-        assertEq(delegation.vibeFactory(), address(vibeFactory));
-        assertEq(delegation.delegatee(), delegatee);
-        assertEq(delegation.initializer(), address(vibeManager));
-        
-        vm.stopPrank();
-        
-        // Test delegatee can update metadata
-        vm.startPrank(delegatee);
-        string memory newMetadata = "ipfs://QmNewHash";
-        vibeManager.updateMetadata(vibeId, newMetadata);
-        
+        // Verify metadata was updated
         VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
         assertEq(vibeData.metadataURI, newMetadata);
         
         vm.stopPrank();
     }
-    
-    function testRTAWrapperCreateVibestreamAndDelegate() public {
+
+    function testMetadataUpdateByDelegatee() public {
         vm.startPrank(creator);
         
-        rtaWrapper.createVibestreamAndDelegate(
-            DEFAULT_START_DATE,
-            DEFAULT_MODE,
-            DEFAULT_STORE_TO_FILECOIN,
-            DEFAULT_DISTANCE,
-            DEFAULT_TITLE,
+        // Create vibestream with delegation
+        uint256 vibeId = vibeFactory.createVibestreamWithDelegate(
+            "solo",
+            true,
+            1,
             DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
-            DEFAULT_TICKET_PRICE,
+            0,
+            0,
             delegatee
         );
         
-        // Check vibestream was created
-        assertEq(vibeFactory.totalVibestreams(), 1);
-        assertEq(vibeFactory.ownerOf(0), creator);
+        vm.stopPrank();
         
-        // Check delegation proxy was created
-        address proxyAddress = vibeManager.vibeDelegationProxy(0);
-        assertTrue(proxyAddress != address(0));
-        assertEq(vibeManager.vibeDelegates(0), delegatee);
+        // Switch to delegatee to update metadata
+        vm.startPrank(delegatee);
+        
+        string memory newMetadata = "ipfs://vibesflow/delegated_update";
+        vibeFactory.setMetadataURI(vibeId, newMetadata);
+        
+        // Verify metadata was updated
+        VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
+        assertEq(vibeData.metadataURI, newMetadata);
         
         vm.stopPrank();
     }
-    
-    function testSoloModeVibestream() public {
+
+    function testFinalizationByCreator() public {
         vm.startPrank(creator);
         
         uint256 vibeId = vibeFactory.createVibestream(
-            DEFAULT_START_DATE,
             "solo",
             true,
-            0, // Distance should be 0 for solo mode
-            DEFAULT_TITLE,
+            1,
             DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
-            DEFAULT_TICKET_PRICE
+            0,
+            0
         );
         
-        VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
-        assertEq(vibeData.mode, "solo");
-        assertEq(vibeData.distance, 0);
+        // Creator should be able to finalize their own vibestream
+        vibeFactory.setFinalized(vibeId);
+        
+        // Verify vibestream was finalized
+        assertTrue(vibeFactory.isFinalized(vibeId));
         
         vm.stopPrank();
     }
-    
+
+    function testTicketPurchase() public {
+        vm.startPrank(creator);
+        
+        // Create a vibestream with tickets
+        uint256 vibeId = vibeFactory.createVibestream(
+            "group",
+            true,
+            5,
+            DEFAULT_METADATA,
+            10, // 10 tickets available
+            DEFAULT_TICKET_PRICE
+        );
+        
+        vm.stopPrank();
+        
+        // Purchase a ticket
+        vm.startPrank(ticketBuyer);
+        
+        uint256 ticketId = vibeKiosk.purchaseTicket{value: DEFAULT_TICKET_PRICE}(vibeId);
+        
+        // Verify ticket was minted
+        assertEq(vibeKiosk.ownerOf(ticketId), ticketBuyer);
+        
+        // Verify ticket info
+        (
+            uint256 returnedVibeId,
+            address ticketOwner,
+            address originalOwner,
+            uint256 purchasePrice,
+            ,
+            string memory ticketName,
+            ,
+            ,
+            uint256 ticketNumber,
+            uint256 totalTickets
+        ) = vibeKiosk.getTicketInfo(ticketId);
+        
+        assertEq(returnedVibeId, vibeId);
+        assertEq(ticketOwner, ticketBuyer);
+        assertEq(originalOwner, ticketBuyer);
+        assertEq(purchasePrice, DEFAULT_TICKET_PRICE);
+        assertEq(ticketNumber, 1); // First ticket
+        assertEq(totalTickets, 10);
+        
+        // Verify user has ticket for this vibestream
+        assertTrue(vibeKiosk.hasTicketForVibestream(ticketBuyer, vibeId));
+        
+        vm.stopPrank();
+    }
+
+    function testMultipleTicketPurchases() public {
+        vm.startPrank(creator);
+        
+        uint256 vibeId = vibeFactory.createVibestream(
+            "group",
+            true,
+            5,
+            DEFAULT_METADATA,
+            5, // 5 tickets available
+            DEFAULT_TICKET_PRICE
+        );
+        
+        vm.stopPrank();
+        
+        // Purchase multiple tickets
+        vm.startPrank(ticketBuyer);
+        
+        uint256 ticket1 = vibeKiosk.purchaseTicket{value: DEFAULT_TICKET_PRICE}(vibeId);
+        uint256 ticket2 = vibeKiosk.purchaseTicket{value: DEFAULT_TICKET_PRICE}(vibeId);
+        
+        // Verify both tickets exist and are owned by buyer
+        assertEq(vibeKiosk.ownerOf(ticket1), ticketBuyer);
+        assertEq(vibeKiosk.ownerOf(ticket2), ticketBuyer);
+        
+        // Verify user's tickets for this vibestream
+        uint256[] memory userTickets = vibeKiosk.getUserTicketsForVibe(ticketBuyer, vibeId);
+        assertEq(userTickets.length, 2);
+        assertEq(userTickets[0], ticket1);
+        assertEq(userTickets[1], ticket2);
+        
+        vm.stopPrank();
+    }
+
+    function testSalesInfo() public {
+        vm.startPrank(creator);
+        
+        uint256 vibeId = vibeFactory.createVibestream(
+            "group",
+            true,
+            5,
+            DEFAULT_METADATA,
+            10,
+            DEFAULT_TICKET_PRICE
+        );
+        
+        vm.stopPrank();
+        
+        // Check initial sales info
+        (
+            uint256 totalTickets,
+            uint256 soldTickets,
+            uint256 remainingTickets,
+            uint256 price,
+            uint256 distance
+        ) = vibeKiosk.getSalesInfo(vibeId);
+        
+        assertEq(totalTickets, 10);
+        assertEq(soldTickets, 0);
+        assertEq(remainingTickets, 10);
+        assertEq(price, DEFAULT_TICKET_PRICE);
+        assertEq(distance, 5);
+        
+        // Purchase a ticket and check updated sales info
+        vm.startPrank(ticketBuyer);
+        vibeKiosk.purchaseTicket{value: DEFAULT_TICKET_PRICE}(vibeId);
+        vm.stopPrank();
+        
+        (totalTickets, soldTickets, remainingTickets, price, distance) = vibeKiosk.getSalesInfo(vibeId);
+        
+        assertEq(totalTickets, 10);
+        assertEq(soldTickets, 1);
+        assertEq(remainingTickets, 9);
+    }
+
+    function testUnauthorizedAccess() public {
+        vm.startPrank(creator);
+        
+        uint256 vibeId = vibeFactory.createVibestream(
+            "solo",
+            true,
+            1,
+            DEFAULT_METADATA,
+            0,
+            0
+        );
+        
+        vm.stopPrank();
+        
+        // Try to update metadata without authorization (should fail)
+        vm.startPrank(makeAddr("unauthorized"));
+        
+        vm.expectRevert();
+        vibeFactory.setMetadataURI(vibeId, "ipfs://unauthorized");
+        
+        vm.expectRevert();
+        vibeFactory.setFinalized(vibeId);
+        
+        vm.stopPrank();
+    }
+
+    function testAuthorizationManagement() public {
+        address newAuthorizedAddress = makeAddr("newAuth");
+        
+        vm.startPrank(owner);
+        
+        // Test adding authorized address
+        vibeFactory.addAuthorizedAddress(newAuthorizedAddress);
+        assertTrue(vibeFactory.isAuthorized(newAuthorizedAddress));
+        
+        // Test removing authorized address
+        vibeFactory.removeAuthorizedAddress(newAuthorizedAddress);
+        assertFalse(vibeFactory.isAuthorized(newAuthorizedAddress));
+        
+        vm.stopPrank();
+    }
+
     function testRevenueDistribution() public {
         vm.startPrank(creator);
         
         uint256 vibeId = vibeFactory.createVibestream(
-            DEFAULT_START_DATE,
-            DEFAULT_MODE,
-            DEFAULT_STORE_TO_FILECOIN,
-            DEFAULT_DISTANCE,
-            DEFAULT_TITLE,
+            "group",
+            true,
+            5,
             DEFAULT_METADATA,
-            DEFAULT_TICKETS_AMOUNT,
-            DEFAULT_TICKET_PRICE
+            1, // Only 1 ticket
+            1 ether // 1 ETH ticket price
         );
-        
-        VibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
-        VibeKiosk vibeKiosk = VibeKiosk(vibeData.vibeKioskAddress);
         
         vm.stopPrank();
         
         // Record initial balances
-        uint256 creatorInitialBalance = creator.balance;
-        uint256 treasuryInitialBalance = treasury.balance;
+        uint256 creatorBalanceBefore = creator.balance;
+        uint256 treasuryBalanceBefore = treasury.balance;
         
         // Purchase ticket
-        vm.deal(buyer, 1 ether);
-        vm.startPrank(buyer);
-        
-        vibeKiosk.purchaseTicket{value: DEFAULT_TICKET_PRICE}();
-        
-        // Check revenue distribution (80% creator, 20% treasury)
-        uint256 expectedCreatorShare = (DEFAULT_TICKET_PRICE * 80) / 100;
-        uint256 expectedTreasuryShare = DEFAULT_TICKET_PRICE - expectedCreatorShare;
-        
-        assertEq(creator.balance - creatorInitialBalance, expectedCreatorShare);
-        assertEq(treasury.balance - treasuryInitialBalance, expectedTreasuryShare);
-        
+        vm.startPrank(ticketBuyer);
+        vibeKiosk.purchaseTicket{value: 1 ether}(vibeId);
         vm.stopPrank();
+        
+        // Verify revenue distribution (80% creator, 20% treasury)
+        uint256 creatorBalanceAfter = creator.balance;
+        uint256 treasuryBalanceAfter = treasury.balance;
+        
+        assertEq(creatorBalanceAfter - creatorBalanceBefore, 0.8 ether);
+        assertEq(treasuryBalanceAfter - treasuryBalanceBefore, 0.2 ether);
     }
 }

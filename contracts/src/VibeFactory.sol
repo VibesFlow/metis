@@ -3,276 +3,379 @@ pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Create2.sol";
-import "./VibeKiosk.sol";
-import "../interfaces/IDistributor.sol";
-import "../interfaces/IVibeManager.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
 /**
  * @title VibeFactory
- * @dev A lightweight, modular ERC721 NFT factory for RTA Vibestreams.
- * Responsibilities:
- * 1. Mint Vibestream NFTs (ERC721).
- * 2. Deploy a unique VibeKiosk for each Vibestream.
- * 3. Act as a central registry linking vibeId to its data and associated contracts.
- * All other logic (Subscription, Pay-Per-Stream, Vibe Management) is handled by standalone contracts.
+ * @dev Simplified factory contract for creating Vibestream NFTs with integrated delegation
+ * Features ProxyAdmin pattern for vibestream-specific delegation management
+ * Optimized for Metis Hyperion compatibility with minimal complexity
  */
-contract VibeFactory is ERC721URIStorage, Ownable {
-    struct VibeData {
-        address creator;
-        uint256 startDate;
-        string mode;           // 'solo' or 'group'
-        bool storeToFilecoin;
-        uint256 distance;      // for group mode (1-10 meters)
-        string metadataURI;
-        address vibeKioskAddress;
-        bool finalized;
-    }
-
-    // State variables
-    mapping(uint256 => VibeData) public vibestreams;
-    mapping(address => uint256[]) public creatorVibestreams;
-    
-    uint256 public currentVibeId;
-
-    // Contract addresses
-    address public vibeManagerContract;
-    address public distributorContract;
-    address public treasuryReceiver;
-
+contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
     // Events
     event VibestreamCreated(
         uint256 indexed vibeId,
         address indexed creator,
-        uint256 startDate,
+        uint256 timestamp,
         string mode,
-        string metadataURI,
-        address vibeKioskAddress
+        uint256 ticketsAmount,
+        uint256 ticketPrice,
+        address requestedDelegatee
     );
-    event MetadataUpdated(uint256 indexed vibeId, string newMetadataURI);
-    event VibestreamFinalized(uint256 indexed vibeId);
+
+    event DelegateSet(uint256 indexed vibeId, address indexed delegatee);
+    event AuthorizedAddressAdded(address indexed newAddress);
+    event AuthorizedAddressRemoved(address indexed removedAddress);
+    event ProxyAdminUpdated(address indexed newProxyAdmin);
+
+    // State variables
+    uint256 public currentVibeId;
+    address public treasuryReceiver;
+    address public proxyAdmin;
+    address public vibeKiosk; // Single standalone VibeKiosk contract address
+
+    // Gas limits for defensive programming
+    uint256 private constant MIN_GAS_BUFFER = 50000; // 50k gas buffer
     
-    // Custom errors
-    error InvalidInput();
-    error DeploymentFailed();
-    error OnlyVibeManager();
-    error VibestreamAlreadyFinalized();
-    error StartDateHasPassed();
-
-    /**
-     * @dev Constructor that initializes the contract
-     */
-    constructor() ERC721("Vibestream", "RTA") Ownable(msg.sender) {
-        // Initialize with deployer as owner initially
-        // The actual owner will be set during deployment
+    // ProxyAdmin-based delegation mappings
+    mapping(uint256 => address) public vibeDelegates; // vibeId => delegatee
+    mapping(address => bool) public authorizedAddresses; // Global authorized addresses
+    
+    // Vibestream data structure
+    struct VibeData {
+        address creator;
+        uint256 startDate;
+        string mode;
+        bool storeToFilecoin;
+        uint256 distance;
+        string metadataURI;
+        uint256 ticketsAmount;
+        uint256 ticketPrice;
+        bool finalized;
     }
-
-    /**
-     * @dev Initializes the contract addresses after deployment
-     */
-    function initialize(
+    
+    // Mappings
+    mapping(uint256 => VibeData) public vibestreams;
+    
+    // Constructor
+    constructor(
         address _owner,
-        address _vibeManager,
-        address _distributor,
         address _treasuryReceiver
-    ) external {
-        // Only allow initialization once and only by the current owner
-        require(vibeManagerContract == address(0), "Already initialized");
-        require(msg.sender == owner(), "Only owner can initialize");
-        
-        vibeManagerContract = _vibeManager;
-        distributorContract = _distributor;
+    ) ERC721("VibesFlow", "VIBE") Ownable(_owner) {
+        require(_treasuryReceiver != address(0), "Invalid treasury receiver");
         treasuryReceiver = _treasuryReceiver;
+        proxyAdmin = _owner; // Initially set owner as proxyAdmin
+        authorizedAddresses[_owner] = true; // Owner is initially authorized
+    }
+    
+    // Modifiers
+    modifier validVibeId(uint256 vibeId) {
+        require(vibeId < currentVibeId, "Invalid vibe ID");
+        _;
+    }
+    
+    modifier hasEnoughGas() {
+        require(gasleft() > MIN_GAS_BUFFER, "Insufficient gas for operation");
+        _;
+    }
+
+    modifier canModifyVibestream(uint256 vibeId) {
+        bool isCreator = vibestreams[vibeId].creator == msg.sender;
+        bool isAuthorizedAddress = authorizedAddresses[msg.sender];
+        bool isProxyAdmin = msg.sender == proxyAdmin;
+        bool isDelegated = vibeDelegates[vibeId] == msg.sender;
         
-        // Transfer ownership to the intended owner if different
-        if (_owner != owner()) {
-            _transferOwnership(_owner);
-        }
+        require(isCreator || isAuthorizedAddress || isProxyAdmin || isDelegated, "Not authorized to modify vibestream");
+        _;
+    }
+
+    modifier onlyProxyAdmin() {
+        bool isProxyAdmin = msg.sender == proxyAdmin;
+        bool isProxyAdminOwner = proxyAdmin != address(0) && 
+                                ProxyAdmin(proxyAdmin).owner() == msg.sender;
+        require(isProxyAdmin || isProxyAdminOwner, "Only ProxyAdmin or ProxyAdmin owner can call this");
+        _;
+    }
+
+    // ProxyAdmin-only functions for delegation management
+    function setProxyAdmin(address _proxyAdmin) external onlyOwner {
+        require(_proxyAdmin != address(0), "Invalid ProxyAdmin address");
+        proxyAdmin = _proxyAdmin;
+        emit ProxyAdminUpdated(_proxyAdmin);
+    }
+
+    function addAuthorizedAddress(address _address) external {
+        require(msg.sender == proxyAdmin || msg.sender == owner(), "Only ProxyAdmin or owner");
+        require(_address != address(0), "Invalid address");
+        authorizedAddresses[_address] = true;
+        emit AuthorizedAddressAdded(_address);
+    }
+
+    function removeAuthorizedAddress(address _address) external {
+        require(msg.sender == proxyAdmin || msg.sender == owner(), "Only ProxyAdmin or owner");
+        authorizedAddresses[_address] = false;
+        emit AuthorizedAddressRemoved(_address);
     }
 
     /**
-     * @dev Creates a new RTA NFT Vibestream and deploys its associated VibeKiosk.
+     * @dev Set standalone VibeKiosk contract address
      */
+    function setVibeKiosk(address _vibeKiosk) external onlyOwner {
+        require(_vibeKiosk != address(0), "Invalid VibeKiosk address");
+        vibeKiosk = _vibeKiosk;
+    }
+
+    /**
+     * @dev Set vibestream-specific delegate (only ProxyAdmin)
+     */
+    function setDelegate(uint256 vibeId, address delegatee) 
+        external 
+        validVibeId(vibeId) 
+        onlyProxyAdmin
+    {
+        require(delegatee != address(0), "Invalid delegatee address");
+        
+        vibeDelegates[vibeId] = delegatee;
+        emit DelegateSet(vibeId, delegatee);
+    }
+
+    /**
+     * @dev Remove vibestream-specific delegate (only ProxyAdmin)
+     */
+    function removeDelegate(uint256 vibeId) 
+        external 
+        validVibeId(vibeId) 
+        onlyProxyAdmin
+    {
+        delete vibeDelegates[vibeId];
+        emit DelegateSet(vibeId, address(0));
+    }
+
+    // Admin functions
+    function setTreasuryReceiver(address _treasuryReceiver) external onlyOwner {
+        require(_treasuryReceiver != address(0), "Invalid treasury receiver");
+        treasuryReceiver = _treasuryReceiver;
+    }
+
+    // Core vibestream creation functions
     function createVibestream(
-        uint256 startDate,
         string calldata mode,
         bool storeToFilecoin,
         uint256 distance,
         string calldata metadataURI,
         uint256 ticketsAmount,
         uint256 ticketPrice
-    ) external returns (uint256 vibeId) {
-        return createVibestreamForCreator(
+    ) external nonReentrant hasEnoughGas returns (uint256 vibeId) {
+        return _createVibestreamInternal(
             msg.sender,
-            startDate,
             mode,
             storeToFilecoin,
             distance,
             metadataURI,
             ticketsAmount,
-            ticketPrice
+            ticketPrice,
+            address(0) // No delegation
         );
     }
 
     /**
-     * @dev Creates a new RTA NFT vibestream for a specific creator and deploys its associated VibeKiosk.
-     * This version allows specifying the creator address, useful for wrapper contracts.
+     * @dev Creates a vibestream and sets up delegation in one transaction
+     * This replaces the need for RTAWrapper.sol
      */
+    function createVibestreamWithDelegate(
+        string calldata mode,
+        bool storeToFilecoin,
+        uint256 distance,
+        string calldata metadataURI,
+        uint256 ticketsAmount,
+        uint256 ticketPrice,
+        address delegatee
+    ) external nonReentrant hasEnoughGas returns (uint256 vibeId) {
+        return _createVibestreamInternal(
+            msg.sender,
+            mode,
+            storeToFilecoin,
+            distance,
+            metadataURI,
+            ticketsAmount,
+            ticketPrice,
+            delegatee
+        );
+    }
+
     function createVibestreamForCreator(
         address creator,
-        uint256 startDate,
         string calldata mode,
         bool storeToFilecoin,
         uint256 distance,
         string calldata metadataURI,
         uint256 ticketsAmount,
         uint256 ticketPrice
-    ) public returns (uint256 vibeId) {
-        uint256 newVibeId = currentVibeId++;
+    ) public nonReentrant hasEnoughGas returns (uint256 vibeId) {
+        require(creator != address(0), "Invalid creator address");
+        return _createVibestreamInternal(
+            creator,
+            mode,
+            storeToFilecoin,
+            distance,
+            metadataURI,
+            ticketsAmount,
+            ticketPrice,
+            address(0) // No delegation
+        );
+    }
+
+    // Vibestream modification functions
+    function setMetadataURI(uint256 vibeId, string calldata newMetadataURI) 
+        external 
+        validVibeId(vibeId)
+        canModifyVibestream(vibeId)
+    {
+        require(bytes(newMetadataURI).length > 0, "Metadata URI cannot be empty");
+        vibestreams[vibeId].metadataURI = newMetadataURI;
+        _setTokenURI(vibeId, newMetadataURI);
+    }
+    
+    function setFinalized(uint256 vibeId) 
+        external 
+        validVibeId(vibeId)
+        canModifyVibestream(vibeId)
+    {
+        vibestreams[vibeId].finalized = true;
+    }
+
+    // Internal creation function
+    function _createVibestreamInternal(
+        address creator,
+        string calldata mode,
+        bool storeToFilecoin,
+        uint256 distance,
+        string calldata metadataURI,
+        uint256 ticketsAmount,
+        uint256 ticketPrice,
+        address delegatee
+    ) internal returns (uint256 vibeId) {
+        // Input validation
+        require(creator != address(0), "Invalid creator address");
+        require(bytes(mode).length > 0, "Mode cannot be empty");
+        require(bytes(metadataURI).length > 0, "Metadata URI cannot be empty");
+        
+        vibeId = currentVibeId++;
 
         // 1. Mint Vibestream NFT to the creator
-        _safeMint(creator, newVibeId);
-        _setTokenURI(newVibeId, metadataURI);
+        _mint(creator, vibeId);
+        _setTokenURI(vibeId, metadataURI);
 
-        // 2. Deploy VibeKiosk for this vibestream using CREATE2 for a deterministic address
-        address vibeKioskAddress = _deployVibeKiosk(newVibeId, creator, ticketsAmount, ticketPrice, mode);
-        if (vibeKioskAddress == address(0)) revert DeploymentFailed();
-
-        // 3. Store vibestream data
-        vibestreams[newVibeId] = VibeData({
+        // 2. Store vibestream data (no VibeKiosk deployment - handled by standalone contract)
+        vibestreams[vibeId] = VibeData({
             creator: creator,
-            startDate: startDate,
+            startDate: block.timestamp,
             mode: mode,
             storeToFilecoin: storeToFilecoin,
             distance: distance,
             metadataURI: metadataURI,
-            vibeKioskAddress: vibeKioskAddress,
+            ticketsAmount: ticketsAmount,
+            ticketPrice: ticketPrice,
             finalized: false
         });
 
-        creatorVibestreams[creator].push(newVibeId);
-
-        // 4. Register the new Vibestream with the Distributor
-        IDistributor(distributorContract).registerVibestream(newVibeId, creator);
-
-        emit VibestreamCreated(newVibeId, creator, startDate, mode, metadataURI, vibeKioskAddress);
-        
-        return newVibeId;
-    }
-
-    // --- Functions callable only by VibeManager ---
-
-    /**
-     * @dev Allows the authorized VibeManager contract to update the metadata URI.
-     * The VibeManager is responsible for handling all permission logic (e.g., only creator or delegate).
-     */
-    function setMetadataURI(uint256 vibeId, string memory newMetadataURI) external {
-        if (msg.sender != vibeManagerContract) revert("Only VibeManager allowed");
-        if (vibestreams[vibeId].finalized) revert("Vibestream already finalized");
-        
-        vibestreams[vibeId].metadataURI = newMetadataURI;
-        _setTokenURI(vibeId, newMetadataURI);
-        
-        emit MetadataUpdated(vibeId, newMetadataURI);
-    }
-
-    /**
-     * @dev Allows the authorized VibeManager contract to finalize a vibestream.
-     */
-    function setFinalized(uint256 vibeId) external {
-        if (msg.sender != vibeManagerContract) revert("Only VibeManager allowed");
-        if (vibestreams[vibeId].finalized) revert("Vibestream already finalized");
-
-        vibestreams[vibeId].finalized = true;
-        emit VibestreamFinalized(vibeId);
-    }
-    
-    /**
-     * @dev Returns the VibeKiosk address for a specific vibestream.
-     */
-    function getVibeKiosk(uint256 vibeId) external view returns (address) {
-        return vibestreams[vibeId].vibeKioskAddress;
-    }
-
-    /**
-     * @dev Returns all VibeKiosk addresses and their corresponding vibe IDs.
-     */
-    function getAllVibeKiosks() external view returns (uint256[] memory vibeIds, address[] memory kioskAddresses) {
-        uint256 totalVibesCount = currentVibeId;
-        vibeIds = new uint256[](totalVibesCount);
-        kioskAddresses = new address[](totalVibesCount);
-        
-        for (uint256 i = 0; i < totalVibesCount; i++) {
-            vibeIds[i] = i;
-            kioskAddresses[i] = vibestreams[i].vibeKioskAddress;
+        // 3. Set up delegation if requested
+        if (delegatee != address(0)) {
+            vibeDelegates[vibeId] = delegatee;
+            emit DelegateSet(vibeId, delegatee);
         }
+
+        // 4. Notify standalone VibeKiosk if tickets are needed
+        if (vibeKiosk != address(0) && ticketsAmount > 0 && !_stringEquals(mode, "solo")) {
+            try this._notifyVibeKiosk(vibeId, ticketsAmount, ticketPrice, distance) {
+                // VibeKiosk notified successfully
+            } catch {
+                // Continue even if VibeKiosk notification fails
+            }
+        }
+
+        emit VibestreamCreated(
+            vibeId,
+            creator,
+            block.timestamp,
+            mode,
+            ticketsAmount,
+            ticketPrice,
+            delegatee
+        );
         
-        return (vibeIds, kioskAddresses);
+        return vibeId;
     }
 
     /**
-     * @dev Returns the full data struct for a given vibestream.
-     * For other contracts to easily get vibe data.
+     * @dev External function to notify VibeKiosk about new vibestream with tickets
      */
-    function getVibestream(uint256 vibeId) external view returns (VibeData memory) {
+    function _notifyVibeKiosk(
+        uint256 vibeId,
+        uint256 ticketsAmount,
+        uint256 ticketPrice,
+        uint256 distance
+    ) external {
+        require(msg.sender == address(this), "Internal function only");
+        
+        if (vibeKiosk != address(0)) {
+            (bool success, ) = vibeKiosk.call(
+                abi.encodeWithSignature(
+                    "registerVibestream(uint256,uint256,uint256,uint256)",
+                    vibeId,
+                    ticketsAmount,
+                    ticketPrice,
+                    distance
+                )
+            );
+            // Don't revert if call fails - just continue
+        }
+    }
+
+    // View functions
+    function getVibestream(uint256 vibeId) 
+        external 
+        view 
+        validVibeId(vibeId) 
+        returns (VibeData memory) 
+    {
         return vibestreams[vibeId];
     }
-
-    /**
-     * @dev Returns the total number of vibestreams created.
-     */
-    function totalVibestreams() external view returns (uint256) {
-        return currentVibeId;
+    
+    function isFinalized(uint256 vibeId) 
+        external 
+        view 
+        validVibeId(vibeId) 
+        returns (bool) 
+    {
+        return vibestreams[vibeId].finalized;
     }
 
-    /**
-     * @dev Returns the vibestreams created by a specific creator.
-     */
-    function getCreatorVibestreams(address creator) external view returns (uint256[] memory) {
-        return creatorVibestreams[creator];
+    function isAuthorized(address _address) external view returns (bool) {
+        return authorizedAddresses[_address];
     }
 
-    /**
-     * @dev Returns the addresses of the standalone contracts.
-     */
-    function getStandaloneContracts() external view returns (address, address, address) {
-        return (vibeManagerContract, distributorContract, treasuryReceiver);
+    function getDelegate(uint256 vibeId) 
+        external 
+        view 
+        validVibeId(vibeId) 
+        returns (address) 
+    {
+        return vibeDelegates[vibeId];
     }
 
-    // Internal & View Functions
-    function _deployVibeKiosk(
-        uint256 vibeId,
-        address creator,
-        uint256 ticketsAmount, 
-        uint256 ticketPrice,
-        string memory mode
-    ) internal returns (address) {
-        bytes memory bytecode = abi.encodePacked(
-            type(VibeKiosk).creationCode,
-            abi.encode(
-                vibeId,
-                address(this),
-                creator,
-                ticketsAmount,
-                ticketPrice,
-                mode,
-                treasuryReceiver
-            )
-        );
-        bytes32 salt = keccak256(abi.encodePacked(vibeId, "vibekiosk"));
-        return Create2.deploy(0, salt, bytecode);
+    // Utility functions
+    function _stringEquals(string memory a, string memory b) internal pure returns (bool) {
+        return keccak256(abi.encodePacked(a)) == keccak256(abi.encodePacked(b));
     }
 
-    function _baseURI() internal pure override returns (string memory) {
-        return ""; // URIs are set individually
-    }
-
-    // Override required by Solidity for multiple inheritance
-    function tokenURI(uint256 tokenId) public view override(ERC721URIStorage) returns (string memory) {
-        return super.tokenURI(tokenId);
-    }
-
-    function supportsInterface(bytes4 interfaceId) public view override(ERC721URIStorage) returns (bool) {
-        return super.supportsInterface(interfaceId);
+    // Emergency functions
+    function emergencyWithdraw() external onlyOwner {
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            (bool success, ) = payable(owner()).call{value: balance}("");
+            require(success, "Emergency withdraw failed");
+        }
     }
 }
