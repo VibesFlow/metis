@@ -4,15 +4,17 @@ pragma solidity ^0.8.24;
 import "forge-std/Script.sol";
 import "../src/VibeFactory.sol";
 import "../src/VibeKiosk.sol";
+import "../src/PPM.sol";
+import "../src/Subscriptions.sol";
 import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
 
 /**
- * @title VibesFlowDeploy
+ * @title Deploy
  * @dev Streamlined VibesFlow architecture
  * Features: VibeFactory with integrated delegation + standalone VibeKiosk + ProxyAdmin
  * Eliminated: RTAWrapper, Distributor, per-vibestream VibeKiosk deployments
  */
-contract VibesFlowDeploy is Script {
+contract Deploy is Script {
     // Deployment configuration
     struct DeploymentConfig {
         address owner;
@@ -24,6 +26,8 @@ contract VibesFlowDeploy is Script {
     struct DeployedContracts {
         address vibeFactory;
         address vibeKiosk;
+        address ppm;
+        address subscriptions;
         address proxyAdmin;
     }
 
@@ -80,6 +84,23 @@ contract VibesFlowDeploy is Script {
         ));
         console.log("VibeKiosk deployed at:", contracts.vibeKiosk);
 
+        // 4. Deploy PPM contract
+        console.log("Deploying PPM contract...");
+        contracts.ppm = address(new PPM(
+            config.owner,
+            contracts.vibeFactory,
+            config.treasuryReceiver
+        ));
+        console.log("PPM deployed at:", contracts.ppm);
+
+        // 5. Deploy Subscriptions contract
+        console.log("Deploying Subscriptions contract...");
+        contracts.subscriptions = address(new Subscriptions(
+            config.owner,
+            config.treasuryReceiver
+        ));
+        console.log("Subscriptions deployed at:", contracts.subscriptions);
+
         return contracts;
     }
 
@@ -94,8 +115,31 @@ contract VibesFlowDeploy is Script {
         VibeFactory vibeFactory = VibeFactory(contracts.vibeFactory);
         vibeFactory.setProxyAdmin(contracts.proxyAdmin);
         vibeFactory.setVibeKiosk(contracts.vibeKiosk);
+        vibeFactory.setPPMContract(contracts.ppm);
 
-        console.log("Simplified architecture configuration complete!");
+        // Configure PPM contract
+        console.log("Configuring PPM contract...");
+        PPM ppm = PPM(payable(contracts.ppm));
+        
+        // Verify PPM configuration
+        console.log("PPM VibeFactory:", address(ppm.vibeFactory()));
+        console.log("PPM Treasury:", ppm.treasuryReceiver());
+        console.log("PPM Treasury Fee:", ppm.treasuryFeePercent());
+        
+        // Configure Subscriptions contract
+        console.log("Configuring Subscriptions contract...");
+        Subscriptions subscriptions = Subscriptions(payable(contracts.subscriptions));
+        
+        // Verify Subscriptions configuration
+        console.log("Subscriptions Treasury:", subscriptions.treasuryReceiver());
+        console.log("Subscriptions Price:", subscriptions.getSubscriptionPrice());
+        console.log("Subscriptions Duration:", subscriptions.getSubscriptionDuration());
+        
+        // Ensure contracts are unpaused (Pausable contracts start unpaused by default)
+        // ppm.unpause(); // Only call if needed
+        // subscriptions.unpause(); // Only call if needed
+
+        console.log("Complete VibesFlow architecture configuration complete!");
     }
 
     function verifyDeployment(DeployedContracts memory contracts) internal view {
@@ -104,28 +148,40 @@ contract VibesFlowDeploy is Script {
         // Verify all contracts have code
         require(contracts.vibeFactory.code.length > 0, "VibeFactory deployment failed");
         require(contracts.vibeKiosk.code.length > 0, "VibeKiosk deployment failed");
+        require(contracts.ppm.code.length > 0, "PPM deployment failed");
+        require(contracts.subscriptions.code.length > 0, "Subscriptions deployment failed");
         require(contracts.proxyAdmin.code.length > 0, "ProxyAdmin deployment failed");
 
         // Verify VibeFactory configuration
         VibeFactory vibeFactory = VibeFactory(contracts.vibeFactory);
         require(vibeFactory.proxyAdmin() == contracts.proxyAdmin, "VibeFactory proxyAdmin not set");
         require(vibeFactory.vibeKiosk() == contracts.vibeKiosk, "VibeFactory vibeKiosk not set");
+        require(vibeFactory.ppmContract() == contracts.ppm, "VibeFactory PPM not set");
 
         // Verify VibeKiosk configuration
         VibeKiosk vibeKiosk = VibeKiosk(contracts.vibeKiosk);
         require(address(vibeKiosk.vibeFactory()) == contracts.vibeFactory, "VibeKiosk factory not set");
 
+        // Verify Subscriptions configuration
+        Subscriptions subscriptions = Subscriptions(payable(contracts.subscriptions));
+        require(subscriptions.getSubscriptionPrice() == 10 ether, "Subscriptions price not set correctly");
+        require(subscriptions.getSubscriptionDuration() == 30 days, "Subscriptions duration not set correctly");
+
         console.log("All simplified architecture verifications passed!");
     }
 
     function logDeploymentAddresses(DeployedContracts memory contracts) internal pure {
-        console.log("\n=== SIMPLIFIED VIBESFLOW DEPLOYMENT COMPLETE ===");
+        console.log("\n=== COMPLETE VIBESFLOW DEPLOYMENT ===");
         console.log("VibeFactory:     ", contracts.vibeFactory);
         console.log("VibeKiosk:       ", contracts.vibeKiosk);
+        console.log("PPM:             ", contracts.ppm);
+        console.log("Subscriptions:   ", contracts.subscriptions);
         console.log("ProxyAdmin:      ", contracts.proxyAdmin);
         console.log("\n=== UPDATE YOUR .env FILES ===");
         console.log("VIBE_FACTORY_ADDRESS=", contracts.vibeFactory);
         console.log("VIBE_KIOSK_ADDRESS=", contracts.vibeKiosk);
+        console.log("PPM_ADDRESS=", contracts.ppm);
+        console.log("SUBSCRIPTIONS_ADDRESS=", contracts.subscriptions);
         console.log("PROXY_ADMIN_ADDRESS=", contracts.proxyAdmin);
         console.log("\n=== SIMPLIFIED ARCHITECTURE BENEFITS ===");
         console.log("[SUCCESS] RTAWrapper eliminated - createVibestreamWithDelegate in VibeFactory");
@@ -135,6 +191,7 @@ contract VibesFlowDeploy is Script {
         console.log("[SUCCESS] Single transaction vibestream creation + delegation");
         console.log("[SUCCESS] ProxyAdmin handles all delegation management");
         console.log("[SUCCESS] Standalone VibeKiosk handles all ticket sales via mappings");
+        console.log("[SUCCESS] Subscriptions contract for Vibe Market access management");
     }
 
     // Helper function for local testing

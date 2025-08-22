@@ -19,6 +19,8 @@ interface IVibeFactory {
         uint256 ticketsAmount;
         uint256 ticketPrice;
         bool finalized;
+        bool payPerStream;
+        uint256 streamPrice;
     }
 
     // --- Events ---
@@ -48,7 +50,9 @@ interface IVibeFactory {
         uint256 distance,
         string calldata metadataURI,
         uint256 ticketsAmount,
-        uint256 ticketPrice
+        uint256 ticketPrice,
+        bool payPerStream,
+        uint256 streamPrice
     ) external returns (uint256 vibeId);
 
     /**
@@ -62,6 +66,8 @@ interface IVibeFactory {
         string calldata metadataURI,
         uint256 ticketsAmount,
         uint256 ticketPrice,
+        bool payPerStream,
+        uint256 streamPrice,
         address delegatee
     ) external returns (uint256 vibeId);
 
@@ -75,7 +81,9 @@ interface IVibeFactory {
         uint256 distance,
         string calldata metadataURI,
         uint256 ticketsAmount,
-        uint256 ticketPrice
+        uint256 ticketPrice,
+        bool payPerStream,
+        uint256 streamPrice
     ) external returns (uint256 vibeId);
 
     // --- ProxyAdmin-Only Delegation Functions ---
@@ -108,6 +116,11 @@ interface IVibeFactory {
      * @dev Sets the standalone VibeKiosk contract address.
      */
     function setVibeKiosk(address _vibeKiosk) external;
+
+    /**
+     * @dev Sets the PPM contract address.
+     */
+    function setPPMContract(address _ppmContract) external;
 
     /**
      * @dev Adds an authorized address to the global whitelist (ProxyAdmin or owner).

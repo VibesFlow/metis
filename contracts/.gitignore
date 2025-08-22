@@ -13,7 +13,4 @@ docs/
 .env
 
 # Temp files
-script/standalones/
-src/PPS.sol
 src/Royalties.sol
-src/Subscriptions.sol

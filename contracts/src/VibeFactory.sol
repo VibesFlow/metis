@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
+import "../interfaces/IPPM.sol";
 
 /**
  * @title VibeFactory
@@ -33,6 +34,7 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
     address public treasuryReceiver;
     address public proxyAdmin;
     address public vibeKiosk; // Single standalone VibeKiosk contract address
+    address public ppmContract; // PPM contract for pay-per-minute functionality
 
     // Profilactic gas limits for network optimization
     uint256 private constant MIN_GAS_BUFFER = 50000; // 50k gas buffer
@@ -52,6 +54,8 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
         uint256 ticketsAmount;
         uint256 ticketPrice;
         bool finalized;
+        bool payPerStream;
+        uint256 streamPrice;
     }
     
     // Mappings
@@ -126,6 +130,14 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
     }
 
     /**
+     * @dev Set PPM contract address
+     */
+    function setPPMContract(address _ppmContract) external onlyOwner {
+        require(_ppmContract != address(0), "Invalid PPM contract address");
+        ppmContract = _ppmContract;
+    }
+
+    /**
      * @dev Set vibestream-specific delegate (only ProxyAdmin)
      */
     function setDelegate(uint256 vibeId, address delegatee) 
@@ -164,7 +176,9 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
         uint256 distance,
         string calldata metadataURI,
         uint256 ticketsAmount,
-        uint256 ticketPrice
+        uint256 ticketPrice,
+        bool payPerStream,
+        uint256 streamPrice
     ) external nonReentrant hasEnoughGas returns (uint256 vibeId) {
         return _createVibestreamInternal(
             msg.sender,
@@ -174,6 +188,8 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
             metadataURI,
             ticketsAmount,
             ticketPrice,
+            payPerStream,
+            streamPrice,
             address(0) // No delegation
         );
     }
@@ -188,6 +204,8 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
         string calldata metadataURI,
         uint256 ticketsAmount,
         uint256 ticketPrice,
+        bool payPerStream,
+        uint256 streamPrice,
         address delegatee
     ) external nonReentrant hasEnoughGas returns (uint256 vibeId) {
         return _createVibestreamInternal(
@@ -198,6 +216,8 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
             metadataURI,
             ticketsAmount,
             ticketPrice,
+            payPerStream,
+            streamPrice,
             delegatee
         );
     }
@@ -209,7 +229,9 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
         uint256 distance,
         string calldata metadataURI,
         uint256 ticketsAmount,
-        uint256 ticketPrice
+        uint256 ticketPrice,
+        bool payPerStream,
+        uint256 streamPrice
     ) public nonReentrant hasEnoughGas returns (uint256 vibeId) {
         require(creator != address(0), "Invalid creator address");
         return _createVibestreamInternal(
@@ -220,6 +242,8 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
             metadataURI,
             ticketsAmount,
             ticketPrice,
+            payPerStream,
+            streamPrice,
             address(0) // No delegation
         );
     }
@@ -252,12 +276,20 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
         string calldata metadataURI,
         uint256 ticketsAmount,
         uint256 ticketPrice,
+        bool payPerStream,
+        uint256 streamPrice,
         address delegatee
     ) internal returns (uint256 vibeId) {
         // Input validation
         require(creator != address(0), "Invalid creator address");
         require(bytes(mode).length > 0, "Mode cannot be empty");
         require(bytes(metadataURI).length > 0, "Metadata URI cannot be empty");
+        
+        // Validate pay-per-stream parameters
+        if (payPerStream) {
+            require(_stringEquals(mode, "group"), "Pay-per-stream only available for group mode");
+            require(streamPrice > 0, "Stream price must be greater than 0 for pay-per-stream");
+        }
         
         vibeId = currentVibeId++;
 
@@ -275,7 +307,9 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
             metadataURI: metadataURI,
             ticketsAmount: ticketsAmount,
             ticketPrice: ticketPrice,
-            finalized: false
+            finalized: false,
+            payPerStream: payPerStream,
+            streamPrice: streamPrice
         });
 
         // 3. Set up delegation if requested
@@ -291,6 +325,20 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
             } catch {
                 // Continue even if VibeKiosk notification fails
             }
+        }
+
+        // 5. Register with PPM contract if pay-per-stream is enabled
+        if (payPerStream && ppmContract != address(0)) {
+            (bool success, ) = ppmContract.call{gas: 200000}(
+                abi.encodeWithSignature(
+                    "registerVibestream(uint256,address,uint256)",
+                    vibeId,
+                    creator,
+                    streamPrice
+                )
+            );
+            // Continue regardless of PPM registration success/failure
+            // This ensures vibestream creation never fails due to PPM issues
         }
 
         emit VibestreamCreated(
@@ -320,8 +368,9 @@ contract VibeFactory is ERC721URIStorage, Ownable, ReentrancyGuard {
         if (vibeKiosk != address(0)) {
             (bool success, ) = vibeKiosk.call(
                 abi.encodeWithSignature(
-                    "registerVibestream(uint256,uint256,uint256,uint256)",
+                    "registerVibestream(uint256,address,uint256,uint256,uint256)",
                     vibeId,
+                    vibestreams[vibeId].creator,
                     ticketsAmount,
                     ticketPrice,
                     distance

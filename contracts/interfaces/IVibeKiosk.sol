@@ -48,6 +48,7 @@ interface IVibeKiosk is IERC721 {
     // Core Functions
     function registerVibestream(
         uint256 vibeId,
+        address creator,
         uint256 ticketsAmount,
         uint256 ticketPrice,
         uint256 distance

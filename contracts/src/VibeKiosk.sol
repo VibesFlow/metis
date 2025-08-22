@@ -5,17 +5,15 @@ import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "../interfaces/IVibeFactory.sol";
 
 /**
  * @title VibeKiosk
- * @dev Standalone contract that manages tickets for ALL vibestreams
- * Uses mappings to track ticket configurations and sales per vibestream
- * Significantly reduces deployment costs and complexity
+ * @dev Simplified standalone contract for vibestream tickets
+ * Simple mapping-based system without complex cross-contract calls
  */
 contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
     
-    // Structs
+    // Simple ticket configuration
     struct TicketConfig {
         uint256 vibeId;
         address creator;
@@ -26,27 +24,27 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         bool isActive;
     }
 
+    // Ticket data
     struct TicketData {
         uint256 vibeId;
         uint256 ticketId;
         address originalOwner;
         uint256 purchasePrice;
         uint256 purchaseTimestamp;
-        string name;
         uint256 ticketNumber;
     }
 
     // State variables
-    IVibeFactory public vibeFactory;
+    address public vibeFactory;
     address public treasuryReceiver;
     uint256 public currentTicketId;
 
-    // Mappings
-    mapping(uint256 => TicketConfig) public vibeConfigs;        // vibeId => TicketConfig
-    mapping(uint256 => TicketData) public tickets;             // ticketId => TicketData
-    mapping(address => uint256[]) public userTickets;          // user => ticketIds[]
-    mapping(uint256 => mapping(address => bool)) public hasTicketForVibe; // vibeId => user => hasTicket
-    mapping(uint256 => uint256[]) public vibeTickets;          // vibeId => ticketIds[]
+    // Simple mappings
+    mapping(uint256 => TicketConfig) public vibeConfigs;
+    mapping(uint256 => TicketData) public tickets;
+    mapping(address => uint256[]) public userTickets;
+    mapping(uint256 => mapping(address => bool)) public hasTicketForVibe;
+    mapping(uint256 => uint256[]) public vibeTickets;
 
     // Events
     event VibestreamRegistered(
@@ -61,20 +59,11 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         uint256 indexed vibeId,
         uint256 indexed ticketId,
         address indexed buyer,
-        string ticketName,
         uint256 price
     );
 
-    event RevenueDistributed(
-        uint256 indexed vibeId,
-        address indexed creator,
-        address indexed treasury,
-        uint256 creatorAmount,
-        uint256 treasuryAmount
-    );
-
     modifier onlyVibeFactory() {
-        require(msg.sender == address(vibeFactory), "Only VibeFactory can call this");
+        require(msg.sender == vibeFactory, "Only VibeFactory can call this");
         _;
     }
 
@@ -91,32 +80,30 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         require(_vibeFactory != address(0), "Invalid VibeFactory address");
         require(_treasuryReceiver != address(0), "Invalid treasury receiver");
         
-        vibeFactory = IVibeFactory(_vibeFactory);
+        vibeFactory = _vibeFactory;
         treasuryReceiver = _treasuryReceiver;
         currentTicketId = 1;
     }
 
     /**
      * @dev Register a vibestream for ticket sales
-     * Called by VibeFactory when a vibestream with tickets is created
+     * Simple registration without cross-contract calls
      */
     function registerVibestream(
         uint256 vibeId,
+        address creator,
         uint256 ticketsAmount,
         uint256 ticketPrice,
         uint256 distance
     ) external onlyVibeFactory {
+        require(creator != address(0), "Invalid creator address");
         require(ticketsAmount > 0, "Must have at least 1 ticket");
         require(!vibeConfigs[vibeId].isActive, "Vibestream already registered");
 
-        // Get vibestream data from VibeFactory
-        IVibeFactory.VibeData memory vibeData = vibeFactory.getVibestream(vibeId);
-        require(vibeData.creator != address(0), "Vibestream does not exist");
-
-        // Register the vibestream
+        // Simple registration with creator passed from VibeFactory
         vibeConfigs[vibeId] = TicketConfig({
             vibeId: vibeId,
-            creator: vibeData.creator,
+            creator: creator,
             ticketsAmount: ticketsAmount,
             ticketPrice: ticketPrice,
             distance: distance,
@@ -124,7 +111,7 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
             isActive: true
         });
 
-        emit VibestreamRegistered(vibeId, vibeData.creator, ticketsAmount, ticketPrice, distance);
+        emit VibestreamRegistered(vibeId, creator, ticketsAmount, ticketPrice, distance);
     }
 
     /**
@@ -137,27 +124,12 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
 
         ticketId = currentTicketId++;
         
-        // Generate ticket name: vibestream{vibeId}_ticket{ticketId}
-        string memory ticketName = string(abi.encodePacked(
-            "vibestream",
-            _toString(vibeId),
-            "_ticket",
-            _toString(ticketId)
-        ));
-
-        // Get metadata from VibeFactory
-        string memory metadataURI = "";
-        try vibeFactory.tokenURI(vibeId) returns (string memory uri) {
-            metadataURI = uri;
-        } catch {
-            // Continue without metadata if call fails
-        }
+        // Simple token URI
+        string memory tokenUri = string(abi.encodePacked("vibestream-", _toString(vibeId), "-ticket-", _toString(ticketId)));
         
         // Mint NFT ticket
         _mint(msg.sender, ticketId);
-        if (bytes(metadataURI).length > 0) {
-            _setTokenURI(ticketId, metadataURI);
-        }
+        _setTokenURI(ticketId, tokenUri);
         
         // Store ticket data
         tickets[ticketId] = TicketData({
@@ -166,7 +138,6 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
             originalOwner: msg.sender,
             purchasePrice: config.ticketPrice,
             purchaseTimestamp: block.timestamp,
-            name: ticketName,
             ticketNumber: config.ticketsSold + 1
         });
         
@@ -176,35 +147,87 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
         vibeTickets[vibeId].push(ticketId);
         config.ticketsSold++;
         
-        // Calculate and distribute revenue: 80% creator, 20% treasury
-        uint256 totalRevenue = config.ticketPrice;
-        uint256 creatorShare = (totalRevenue * 80) / 100;
-        uint256 treasuryShare = totalRevenue - creatorShare;
-        
-        // Distribute revenue
-        bool creatorSuccess = false;
-        bool treasurySuccess = false;
-        
-        if (creatorShare > 0) {
-            (creatorSuccess, ) = payable(config.creator).call{value: creatorShare}("");
+        // Simple revenue distribution: 80% creator, 20% treasury
+        if (config.ticketPrice > 0) {
+            uint256 creatorShare = (config.ticketPrice * 80) / 100;
+            uint256 treasuryShare = config.ticketPrice - creatorShare;
+            
+            if (creatorShare > 0) {
+                payable(config.creator).transfer(creatorShare);
+            }
+            if (treasuryShare > 0) {
+                payable(treasuryReceiver).transfer(treasuryShare);
+            }
         }
-        
-        if (treasuryShare > 0) {
-            (treasurySuccess, ) = payable(treasuryReceiver).call{value: treasuryShare}("");
-        }
-        
-        require(creatorSuccess || creatorShare == 0, "Creator payment failed");
-        require(treasurySuccess || treasuryShare == 0, "Treasury payment failed");
         
         // Refund excess payment
         if (msg.value > config.ticketPrice) {
             payable(msg.sender).transfer(msg.value - config.ticketPrice);
         }
         
-        emit TicketMinted(vibeId, ticketId, msg.sender, ticketName, config.ticketPrice);
-        emit RevenueDistributed(vibeId, config.creator, treasuryReceiver, creatorShare, treasuryShare);
-        
+        emit TicketMinted(vibeId, ticketId, msg.sender, config.ticketPrice);
         return ticketId;
+    }
+
+    /**
+     * @dev Get vibestream ticket configuration
+     */
+    function getVibeConfig(uint256 vibeId) external view returns (TicketConfig memory) {
+        return vibeConfigs[vibeId];
+    }
+
+    /**
+     * @dev Check if user has ticket for specific vibestream
+     */
+    function hasTicketForVibestream(address user, uint256 vibeId) external view returns (bool) {
+        return hasTicketForVibe[vibeId][user];
+    }
+
+    /**
+     * @dev Get user's tickets for a specific vibestream
+     */
+    function getUserTicketsForVibe(address user, uint256 vibeId) external view returns (uint256[] memory) {
+        uint256[] storage allUserTickets = userTickets[user];
+        uint256 count = 0;
+        
+        for (uint256 i = 0; i < allUserTickets.length; i++) {
+            if (tickets[allUserTickets[i]].vibeId == vibeId) {
+                count++;
+            }
+        }
+        
+        uint256[] memory vibeUserTickets = new uint256[](count);
+        uint256 index = 0;
+        
+        for (uint256 i = 0; i < allUserTickets.length; i++) {
+            if (tickets[allUserTickets[i]].vibeId == vibeId) {
+                vibeUserTickets[index] = allUserTickets[i];
+                index++;
+            }
+        }
+        
+        return vibeUserTickets;
+    }
+
+    /**
+     * @dev Get all user's tickets
+     */
+    function getUserTickets(address user) external view returns (uint256[] memory) {
+        return userTickets[user];
+    }
+
+    /**
+     * @dev Get all tickets for a vibestream
+     */
+    function getVibeTickets(uint256 vibeId) external view returns (uint256[] memory) {
+        return vibeTickets[vibeId];
+    }
+
+    /**
+     * @dev Check if tickets are available for a vibestream
+     */
+    function isAvailable(uint256 vibeId) external view validVibeId(vibeId) returns (bool) {
+        return vibeConfigs[vibeId].ticketsSold < vibeConfigs[vibeId].ticketsAmount;
     }
 
     /**
@@ -233,19 +256,12 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
             ticket.originalOwner,
             ticket.purchasePrice,
             ticket.purchaseTimestamp,
-            ticket.name,
+            string(abi.encodePacked("vibestream", _toString(ticket.vibeId), "_ticket", _toString(ticketId))),
             config.distance,
             tokenURI(ticketId),
             ticket.ticketNumber,
             config.ticketsAmount
         );
-    }
-
-    /**
-     * @dev Get vibestream ticket configuration
-     */
-    function getVibeConfig(uint256 vibeId) external view returns (TicketConfig memory) {
-        return vibeConfigs[vibeId];
     }
 
     /**
@@ -269,79 +285,16 @@ contract VibeKiosk is ERC721, ERC721URIStorage, ReentrancyGuard, Ownable {
     }
 
     /**
-     * @dev Get user's tickets for a specific vibestream
-     */
-    function getUserTicketsForVibe(address user, uint256 vibeId) external view returns (uint256[] memory) {
-        uint256[] storage allUserTickets = userTickets[user];
-        uint256 count = 0;
-        
-        // Count tickets for this vibestream
-        for (uint256 i = 0; i < allUserTickets.length; i++) {
-            if (tickets[allUserTickets[i]].vibeId == vibeId) {
-                count++;
-            }
-        }
-        
-        // Create array with correct size
-        uint256[] memory vibeUserTickets = new uint256[](count);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < allUserTickets.length; i++) {
-            if (tickets[allUserTickets[i]].vibeId == vibeId) {
-                vibeUserTickets[index] = allUserTickets[i];
-                index++;
-            }
-        }
-        
-        return vibeUserTickets;
-    }
-
-    /**
-     * @dev Get all user's tickets
-     */
-    function getUserTickets(address user) external view returns (uint256[] memory) {
-        return userTickets[user];
-    }
-
-    /**
-     * @dev Check if user has ticket for specific vibestream
-     */
-    function hasTicketForVibestream(address user, uint256 vibeId) external view returns (bool) {
-        return hasTicketForVibe[vibeId][user];
-    }
-
-    /**
-     * @dev Get all tickets for a vibestream
-     */
-    function getVibeTickets(uint256 vibeId) external view returns (uint256[] memory) {
-        return vibeTickets[vibeId];
-    }
-
-    /**
-     * @dev Check if tickets are available for a vibestream
-     */
-    function isAvailable(uint256 vibeId) external view validVibeId(vibeId) returns (bool) {
-        return vibeConfigs[vibeId].ticketsSold < vibeConfigs[vibeId].ticketsAmount;
-    }
-
-    /**
      * @dev Update configuration (only owner)
      */
     function updateVibeFactory(address _vibeFactory) external onlyOwner {
         require(_vibeFactory != address(0), "Invalid VibeFactory address");
-        vibeFactory = IVibeFactory(_vibeFactory);
+        vibeFactory = _vibeFactory;
     }
 
     function updateTreasuryReceiver(address _treasuryReceiver) external onlyOwner {
         require(_treasuryReceiver != address(0), "Invalid treasury receiver");
         treasuryReceiver = _treasuryReceiver;
-    }
-
-    /**
-     * @dev Deactivate a vibestream (emergency only)
-     */
-    function deactivateVibestream(uint256 vibeId) external onlyOwner {
-        vibeConfigs[vibeId].isActive = false;
     }
 
     /**
